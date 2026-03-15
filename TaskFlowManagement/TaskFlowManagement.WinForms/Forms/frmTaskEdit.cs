@@ -1,4 +1,5 @@
 using System.IO;
+using System.Reflection;
 using TaskFlowManagement.Core.Entities;
 using TaskFlowManagement.Core.Interfaces.Services;
 using TaskFlowManagement.WinForms.Common;
@@ -83,6 +84,31 @@ namespace TaskFlowManagement.WinForms.Forms
                 await LoadTaskForEditAsync(_taskId.Value);
             else
                 SetDefaultsForNewTask();
+
+            // DoubleBuffer cho FlowLayoutPanel chống flickering khi cuộn / Resize
+            SetDoubleBuffered(pnlCommentsList);
+
+            // phím Enter gửi bình luận (Ctrl+Enter xuống dòng)
+            txtNewComment.KeyDown += txtNewComment_KeyDown;
+        }
+
+        /// <summary>Bật DoubleBuffered cho bất kỳ Control nào qua Reflection (WinForms ẩn thuộc tính này).</summary>
+        private static void SetDoubleBuffered(Control ctrl)
+        {
+            var prop = typeof(Control).GetProperty(
+                "DoubleBuffered",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            prop?.SetValue(ctrl, true);
+        }
+
+        private void txtNewComment_KeyDown(object? sender, KeyEventArgs e)
+        {
+            // Enter đơn → gửi; Ctrl+Enter → xuống dòng thực sự
+            if (e.KeyCode == Keys.Enter && !e.Control)
+            {
+                e.SuppressKeyPress = true;
+                btnSendComment.PerformClick();
+            }
         }
 
         // ── Load Lookups ──────────────────────────────────────────────────────
@@ -369,7 +395,8 @@ namespace TaskFlowManagement.WinForms.Forms
                             TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
                             Dock = DockStyle.Top,
                             Height = 100,
-                            AutoSize = false
+                            AutoSize = false,
+                            Tag = "empty"  // đánh dấu để xác định khi gửi tin mới
                         };
                         pnlCommentsList.Controls.Add(lblEmpty);
                     }
@@ -511,9 +538,11 @@ namespace TaskFlowManagement.WinForms.Forms
             if (ok && newComment != null)
             {
                 txtNewComment.Clear();
-                
-                // Nếu đang hiển thị label trống thì xóa đi trước
-                if (pnlCommentsList.Controls.Count == 1 && pnlCommentsList.Controls[0] is Label lbl && lbl.Height == 100)
+
+                // Xóa Empty-State label nếu có
+                if (pnlCommentsList.Controls.Count == 1
+                    && pnlCommentsList.Controls[0] is Label emptyLbl
+                    && emptyLbl.Tag is string tag && tag == "empty")
                 {
                     pnlCommentsList.Controls.Clear();
                 }
@@ -554,10 +583,29 @@ namespace TaskFlowManagement.WinForms.Forms
 
             using var ofd = new OpenFileDialog();
             ofd.Multiselect = false;
+            ofd.Filter = "Tất cả file|*.*";
             if (ofd.ShowDialog() == DialogResult.OK)
             {
+                string? err = ValidateFileForUpload(ofd.FileName);
+                if (err != null) { MessageBox.Show(err, "Không thể đính kèm", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
                 await UploadFileAsync(ofd.FileName);
             }
+        }
+
+        // Danh sách đuôi file bị chặn vì mục tiêu bảo mật
+        private static readonly HashSet<string> BlockedExtensions =
+            new(StringComparer.OrdinalIgnoreCase) { ".exe", ".bat", ".msi", ".cmd", ".ps1", ".vbs", ".js", ".reg" };
+        private const long MaxFileSizeBytes = 10L * 1024 * 1024; // 10 MB
+
+        private static string? ValidateFileForUpload(string filePath)
+        {
+            var info = new FileInfo(filePath);
+            if (!info.Exists) return "File không tồn tại.";
+            if (info.Length > MaxFileSizeBytes)
+                return $"File quá lớn (tối đa 10 MB). File này có kích thước {info.Length / 1024 / 1024:F1} MB.";
+            if (BlockedExtensions.Contains(info.Extension))
+                return $"Không được phép đính kèm file có đuôi '{info.Extension}' vì lý do bảo mật.";
+            return null;
         }
 
         private void lvwAttachments_DragEnter(object? sender, DragEventArgs e)
@@ -579,6 +627,8 @@ namespace TaskFlowManagement.WinForms.Forms
             var files = (string[])e.Data!.GetData(DataFormats.FileDrop)!;
             if (files.Length > 0)
             {
+                string? err = ValidateFileForUpload(files[0]);
+                if (err != null) { MessageBox.Show(err, "Không thể đính kèm", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
                 await UploadFileAsync(files[0]);
             }
         }
