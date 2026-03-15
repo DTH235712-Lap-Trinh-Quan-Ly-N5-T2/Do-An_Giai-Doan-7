@@ -174,5 +174,28 @@ namespace TaskFlowManagement.Core.Interfaces.Services
         /// Đã bao gồm logic sắp xếp: Priority (Critical -> Low) và DueDate (Gần -> Xa).
         /// </summary>
         Task<List<TaskItem>> GetBoardTasksAsync(int projectId);
+
+        // ── Giai đoạn 7: Comment & Attachment ────────────────────
+        
+        Task<List<Comment>> GetCommentsAsync(int taskId);
+        
+        Task<(bool Success, string Message, Comment? Data)> AddCommentAsync(
+            int taskId, 
+            string content, 
+            int requesterId, 
+            IList<string> requesterRoles);
+
+        Task<List<Attachment>> GetAttachmentsAsync(int taskId);
+        
+        Task<(bool Success, string Message, Attachment? Data)> UploadAttachmentAsync(
+            int taskId, 
+            string sourcePath, 
+            int requesterId, 
+            IList<string> requesterRoles);
+
+        Task<(bool Success, string Message)> DeleteAttachmentAsync(
+            int attachmentId, 
+            int requesterId, 
+            IList<string> requesterRoles);
     }
 }

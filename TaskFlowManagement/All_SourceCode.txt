@@ -909,6 +909,36 @@ namespace TaskFlowManagement.Core.Helpers
 
 
 ========================================
+--- FILE: IAttachmentRepository.cs ---
+========================================
+
+using TaskFlowManagement.Core.Entities;
+
+namespace TaskFlowManagement.Core.Interfaces
+{
+    public interface IAttachmentRepository : IRepository<Attachment>
+    {
+        Task<List<Attachment>> GetByTaskIdAsync(int taskId);
+    }
+}
+
+
+========================================
+--- FILE: ICommentRepository.cs ---
+========================================
+
+using TaskFlowManagement.Core.Entities;
+
+namespace TaskFlowManagement.Core.Interfaces
+{
+    public interface ICommentRepository : IRepository<Comment>
+    {
+        Task<List<Comment>> GetByTaskIdAsync(int taskId);
+    }
+}
+
+
+========================================
 --- FILE: ICustomerRepository.cs ---
 ========================================
 
@@ -1466,6 +1496,29 @@ namespace TaskFlowManagement.Core.Interfaces.Services
         /// Đã bao gồm logic sắp xếp: Priority (Critical -> Low) và DueDate (Gần -> Xa).
         /// </summary>
         Task<List<TaskItem>> GetBoardTasksAsync(int projectId);
+
+        // ── Giai đoạn 7: Comment & Attachment ────────────────────
+        
+        Task<List<Comment>> GetCommentsAsync(int taskId);
+        
+        Task<(bool Success, string Message, Comment? Data)> AddCommentAsync(
+            int taskId, 
+            string content, 
+            int requesterId, 
+            IList<string> requesterRoles);
+
+        Task<List<Attachment>> GetAttachmentsAsync(int taskId);
+        
+        Task<(bool Success, string Message, Attachment? Data)> UploadAttachmentAsync(
+            int taskId, 
+            string sourcePath, 
+            int requesterId, 
+            IList<string> requesterRoles);
+
+        Task<(bool Success, string Message)> DeleteAttachmentAsync(
+            int attachmentId, 
+            int requesterId, 
+            IList<string> requesterRoles);
     }
 }
 
@@ -1540,7 +1593,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bd9b5ff87553b95c029a03c64bb00f5d05bf6674")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -1593,7 +1646,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+21475b85ea8b4e7a8954939c989347ca129bdafe")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.Core")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -1870,13 +1923,24 @@ namespace TaskFlowManagement.Core.Services.Tasks
     {
         private readonly ITaskRepository _taskRepo;
         private readonly IUserRepository _userRepo;
+        private readonly IProjectRepository _projectRepo;
+        private readonly ICommentRepository _commentRepo;
+        private readonly IAttachmentRepository _attachmentRepo;
 
         public event EventHandler? TaskDataChanged;
 
-        public TaskService(ITaskRepository taskRepo, IUserRepository userRepo)
+        public TaskService(
+            ITaskRepository taskRepo, 
+            IUserRepository userRepo,
+            IProjectRepository projectRepo,
+            ICommentRepository commentRepo,
+            IAttachmentRepository attachmentRepo)
         {
             _taskRepo = taskRepo ?? throw new ArgumentNullException(nameof(taskRepo));
             _userRepo = userRepo ?? throw new ArgumentNullException(nameof(userRepo));
+            _projectRepo = projectRepo ?? throw new ArgumentNullException(nameof(projectRepo));
+            _commentRepo = commentRepo ?? throw new ArgumentNullException(nameof(commentRepo));
+            _attachmentRepo = attachmentRepo ?? throw new ArgumentNullException(nameof(attachmentRepo));
         }
 
         private void NotifyTaskDataChanged()
@@ -2024,6 +2088,18 @@ namespace TaskFlowManagement.Core.Services.Tasks
                     "Hãy xóa các công việc con trước.");
 
             await _taskRepo.DeleteAsync(taskId);
+            
+            // Xóa folder vật lý chứa đính kèm
+            try 
+            {
+                var uploadsFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uploads", "Tasks", taskId.ToString());
+                if (Directory.Exists(uploadsFolder))
+                {
+                    Directory.Delete(uploadsFolder, true);
+                }
+            } 
+            catch { /* Ignore if it fails during cleanup */ }
+
             NotifyTaskDataChanged();
             return (true, $"Đã xóa công việc \"{task.Title}\".");
         }
@@ -2171,6 +2247,159 @@ namespace TaskFlowManagement.Core.Services.Tasks
         public Task<List<Status>>   GetAllStatusesAsync()   => _taskRepo.GetAllStatusesAsync();
         public Task<List<Priority>> GetAllPrioritiesAsync() => _taskRepo.GetAllPrioritiesAsync();
         public Task<List<Category>> GetAllCategoriesAsync() => _taskRepo.GetAllCategoriesAsync();
+
+        // ══════════════════════════════════════════════════════
+        // GIAI ĐOẠN 7: COMMENT & ATTACHMENT
+        // ══════════════════════════════════════════════════════
+
+        private async Task<bool> IsAuthorizedForTaskAsync(int taskId, int requesterId, IList<string> requesterRoles)
+        {
+            if (requesterRoles.Any(r => r.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                                        r.Equals("Manager", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var task = await _taskRepo.GetByIdAsync(taskId);
+            if (task == null) return false;
+
+            var members = await _projectRepo.GetMembersAsync(task.ProjectId);
+            return members.Any(m => m.UserId == requesterId);
+        }
+
+        public async Task<List<Comment>> GetCommentsAsync(int taskId)
+        {
+             return await _commentRepo.GetByTaskIdAsync(taskId);
+        }
+
+        public async Task<(bool Success, string Message, Comment? Data)> AddCommentAsync(
+            int taskId,
+            string content,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+             if (string.IsNullOrWhiteSpace(content))
+                 return (false, "Nội dung bình luận không được để trống.", null);
+
+             var isAuth = await IsAuthorizedForTaskAsync(taskId, requesterId, requesterRoles);
+             if (!isAuth)
+                 return (false, "Bạn không có quyền bình luận trong công việc này.", null);
+
+             var comment = new Comment
+             {
+                 TaskItemId = taskId,
+                 UserId = requesterId,
+                 Content = content,
+                 CreatedAt = DateTime.UtcNow
+             };
+
+             await _commentRepo.AddAsync(comment);
+             
+             // Get full data to return to UI (including user info)
+             var addedComment = await _commentRepo.GetByIdAsync(comment.Id);
+             
+             NotifyTaskDataChanged();
+             return (true, "Thêm bình luận thành công.", addedComment);
+        }
+
+        public async Task<List<Attachment>> GetAttachmentsAsync(int taskId)
+        {
+             return await _attachmentRepo.GetByTaskIdAsync(taskId);
+        }
+
+        public async Task<(bool Success, string Message, Attachment? Data)> UploadAttachmentAsync(
+            int taskId,
+            string sourcePath,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+            var isAuth = await IsAuthorizedForTaskAsync(taskId, requesterId, requesterRoles);
+            if (!isAuth)
+                return (false, "Bạn không có quyền đính kèm file trong công việc này.", null);
+
+            var fileInfo = new FileInfo(sourcePath);
+            if (!fileInfo.Exists)
+                return (false, "File không tồn tại.", null);
+
+            var fileName = fileInfo.Name;
+            var extension = fileInfo.Extension;
+            var sizeBytes = fileInfo.Length;
+
+            // Define upload path
+            var uploadsFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uploads", "Tasks", taskId.ToString());
+            if (!Directory.Exists(uploadsFolder))
+            {
+                Directory.CreateDirectory(uploadsFolder);
+            }
+
+            // Generate unique filename to avoid collision
+            var uniqueFileName = $"{Guid.NewGuid()}_{fileName}";
+            var destinationPath = Path.Combine(uploadsFolder, uniqueFileName);
+
+            try
+            {
+                await Task.Run(() => File.Copy(sourcePath, destinationPath, true));
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Lỗi khi tải lên tệp: {ex.Message}", null);
+            }
+
+            var relativePath = Path.Combine("Uploads", "Tasks", taskId.ToString(), uniqueFileName);
+
+            var attachment = new Attachment
+            {
+                TaskItemId = taskId,
+                UploadedById = requesterId,
+                FileName = fileName,
+                FilePath = relativePath,
+                ContentType = extension,
+                FileSizeBytes = sizeBytes,
+                UploadedAt = DateTime.UtcNow
+            };
+
+            await _attachmentRepo.AddAsync(attachment);
+
+            var addedAttachment = await _attachmentRepo.GetByIdAsync(attachment.Id);
+
+            NotifyTaskDataChanged();
+            return (true, "Tải tệp thành công.", addedAttachment);
+        }
+
+        public async Task<(bool Success, string Message)> DeleteAttachmentAsync(
+            int attachmentId,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+             var attachment = await _attachmentRepo.GetByIdAsync(attachmentId);
+             if (attachment == null) return (false, "Không tìm thấy file.");
+
+             var isManagerOrAbove = requesterRoles.Any(r => r.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                                                             r.Equals("Manager", StringComparison.OrdinalIgnoreCase));
+             
+             // Only owner or manager/admin can delete
+             if (attachment.UploadedById != requesterId && !isManagerOrAbove)
+                 return (false, "Bạn không có quyền xóa tệp này.");
+
+             // Delete physical file
+             var fullPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, attachment.FilePath);
+             if (File.Exists(fullPath))
+             {
+                 try
+                 {
+                     File.Delete(fullPath);
+                 }
+                 catch
+                 {
+                     // ignore if can't delete physically
+                 }
+             }
+
+             await _attachmentRepo.DeleteAsync(attachmentId);
+             NotifyTaskDataChanged();
+
+             return (true, "Đã xóa file đính kèm.");
+        }
     }
 }
 
@@ -5513,7 +5742,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bd9b5ff87553b95c029a03c64bb00f5d05bf6674")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -5566,7 +5795,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+21475b85ea8b4e7a8954939c989347ca129bdafe")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.Infrastructure")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -5587,6 +5816,162 @@ global using System.Linq;
 global using System.Net.Http;
 global using System.Threading;
 global using System.Threading.Tasks;
+
+
+========================================
+--- FILE: AttachmentRepository.cs ---
+========================================
+
+using Microsoft.EntityFrameworkCore;
+using TaskFlowManagement.Core.Entities;
+using TaskFlowManagement.Core.Interfaces;
+using TaskFlowManagement.Infrastructure.Data;
+
+namespace TaskFlowManagement.Infrastructure.Repositories
+{
+    public class AttachmentRepository : IAttachmentRepository
+    {
+        private readonly IDbContextFactory<AppDbContext> _contextFactory;
+
+        public AttachmentRepository(IDbContextFactory<AppDbContext> contextFactory)
+        {
+            _contextFactory = contextFactory;
+        }
+
+        public async Task<Attachment?> GetByIdAsync(int id)
+        {
+             using var ctx = await _contextFactory.CreateDbContextAsync();
+             return await ctx.Attachments
+                 .Include(a => a.UploadedBy)
+                 .AsNoTracking()
+                 .FirstOrDefaultAsync(a => a.Id == id);
+        }
+
+        public async Task<List<Attachment>> GetAllAsync()
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            return await ctx.Attachments
+                .Include(a => a.UploadedBy)
+                .AsNoTracking()
+                .OrderBy(a => a.UploadedAt)
+                .ToListAsync();
+        }
+
+        public async Task AddAsync(Attachment entity)
+        {
+             using var ctx = await _contextFactory.CreateDbContextAsync();
+             await ctx.Attachments.AddAsync(entity);
+             await ctx.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(Attachment entity)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            ctx.Attachments.Update(entity);
+            await ctx.SaveChangesAsync();
+        }
+
+        public async Task DeleteAsync(int id)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            var attachment = await ctx.Attachments.FindAsync(id);
+            if (attachment != null)
+            {
+                ctx.Attachments.Remove(attachment);
+                await ctx.SaveChangesAsync();
+            }
+        }
+
+        public async Task<List<Attachment>> GetByTaskIdAsync(int taskId)
+        {
+             using var ctx = await _contextFactory.CreateDbContextAsync();
+             return await ctx.Attachments
+                 .Include(a => a.UploadedBy)
+                 .Where(a => a.TaskItemId == taskId)
+                 .AsNoTracking()
+                 .OrderByDescending(a => a.UploadedAt)
+                 .ToListAsync();
+        }
+    }
+}
+
+
+========================================
+--- FILE: CommentRepository.cs ---
+========================================
+
+using Microsoft.EntityFrameworkCore;
+using TaskFlowManagement.Core.Entities;
+using TaskFlowManagement.Core.Interfaces;
+using TaskFlowManagement.Infrastructure.Data;
+
+namespace TaskFlowManagement.Infrastructure.Repositories
+{
+    public class CommentRepository : ICommentRepository
+    {
+        private readonly IDbContextFactory<AppDbContext> _contextFactory;
+
+        public CommentRepository(IDbContextFactory<AppDbContext> contextFactory)
+        {
+            _contextFactory = contextFactory;
+        }
+
+        public async Task<Comment?> GetByIdAsync(int id)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            return await ctx.Comments
+                .Include(c => c.User)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == id);
+        }
+
+        public async Task<List<Comment>> GetAllAsync()
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            return await ctx.Comments
+                .Include(c => c.User)
+                .AsNoTracking()
+                .OrderBy(c => c.CreatedAt)
+                .ToListAsync();
+        }
+
+        public async Task AddAsync(Comment entity)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            await ctx.Comments.AddAsync(entity);
+            await ctx.SaveChangesAsync();
+        }
+
+        public async Task UpdateAsync(Comment entity)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            ctx.Comments.Update(entity);
+            await ctx.SaveChangesAsync();
+        }
+
+        public async Task DeleteAsync(int id)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            var comment = await ctx.Comments.FindAsync(id);
+            if (comment != null)
+            {
+                ctx.Comments.Remove(comment);
+                await ctx.SaveChangesAsync();
+            }
+        }
+
+        public async Task<List<Comment>> GetByTaskIdAsync(int taskId)
+        {
+            using var ctx = await _contextFactory.CreateDbContextAsync();
+            return await ctx.Comments
+                .Include(c => c.User)
+                .Where(c => c.TaskItemId == taskId)
+                .AsNoTracking()
+                .OrderBy(c => c.CreatedAt)
+                .ToListAsync();
+        }
+    }
+}
 
 
 ========================================
@@ -6720,6 +7105,8 @@ namespace TaskFlowManagement.WinForms
             services.AddScoped<IProjectRepository, ProjectRepository>();
             services.AddScoped<ITaskRepository, TaskRepository>();
             services.AddScoped<ICustomerRepository, CustomerRepository>();
+            services.AddScoped<ICommentRepository, CommentRepository>();
+            services.AddScoped<IAttachmentRepository, AttachmentRepository>();
 
             // 4. Services
             services.AddScoped<IAuthService, AuthService>();
@@ -6928,6 +7315,31 @@ namespace TaskFlowManagement.WinForms.Common
     public record ComboItem(int Id, string Label)
     {
         public override string ToString() => Label;
+    }
+}
+
+
+========================================
+--- FILE: ControlExtensions.cs ---
+========================================
+
+using System.Windows.Forms;
+
+namespace TaskFlowManagement.WinForms.Common
+{
+    public static class ControlExtensions
+    {
+        public static void InvokeIfRequired(this Control control, Action action)
+        {
+            if (control.InvokeRequired)
+            {
+                control.Invoke(action);
+            }
+            else
+            {
+                action();
+            }
+        }
     }
 }
 
@@ -14284,6 +14696,7 @@ namespace TaskFlowManagement.WinForms.Forms
 --- FILE: frmTaskEdit.cs ---
 ========================================
 
+using System.IO;
 using TaskFlowManagement.Core.Entities;
 using TaskFlowManagement.Core.Interfaces.Services;
 using TaskFlowManagement.WinForms.Common;
@@ -14476,6 +14889,9 @@ namespace TaskFlowManagement.WinForms.Forms
             cboStatus.Enabled = isManager || isAssignee;
             cboPriority.Enabled = isManager;
             cboAssignee.Enabled = isManager || isAssignee;
+
+            await LoadCommentsAsync();
+            await LoadAttachmentsAsync();
         }
 
         private void SetDefaultsForNewTask()
@@ -14613,6 +15029,319 @@ namespace TaskFlowManagement.WinForms.Forms
                 { cbo.SelectedIndex = i; return; }
             }
         }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // GIAI ĐOẠN 7: COMMENT & ATTACHMENT LOGIC
+        // ═══════════════════════════════════════════════════════════════════
+
+        private void tabControlMain_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (tabControlMain.SelectedTab == tabComments)
+            {
+                _ = LoadCommentsAsync();
+            }
+            else if (tabControlMain.SelectedTab == tabAttachments)
+            {
+                _ = LoadAttachmentsAsync();
+            }
+        }
+
+        private async Task LoadCommentsAsync()
+        {
+            if (!_taskId.HasValue) return;
+            
+            try 
+            {
+                var comments = await _taskService.GetCommentsAsync(_taskId.Value);
+                
+                this.InvokeIfRequired(() => {
+                    pnlCommentsList.Controls.Clear();
+                    
+                    if (comments == null || comments.Count == 0)
+                    {
+                        var lblEmpty = new Label
+                        {
+                            Text = "Chưa có bình luận nào cho công việc này. Hãy là người đầu tiên thảo luận!",
+                            Font = UIHelper.FontBase,
+                            ForeColor = UIHelper.ColorMuted,
+                            TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
+                            Dock = DockStyle.Top,
+                            Height = 100,
+                            AutoSize = false
+                        };
+                        pnlCommentsList.Controls.Add(lblEmpty);
+                    }
+                    else 
+                    {
+                        foreach (var c in comments)
+                        {
+                            AddCommentToUI(c);
+                        }
+                    }
+                    
+                    // Cuộn xuống dưới cùng
+                    ScrollToBottom();
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi nạp bình luận: " + ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ScrollToBottom()
+        {
+            if (pnlCommentsList.VerticalScroll.Visible)
+            {
+                pnlCommentsList.VerticalScroll.Value = pnlCommentsList.VerticalScroll.Maximum;
+            }
+            pnlCommentsList.PerformLayout();
+        }
+
+        private void pnlCommentsList_Resize(object? sender, EventArgs e)
+        {
+            // Cập nhật lại chiều rộng của tất cả bình luận khi Panel thay đổi kích thước
+            pnlCommentsList.SuspendLayout();
+            foreach (Control ctrl in pnlCommentsList.Controls)
+            {
+                if (ctrl is Panel pnl && pnl.Tag is Comment)
+                {
+                    UpdateCommentPanelWidth(pnl);
+                }
+                else if (ctrl is Label lbl && lbl.Height == 100) // Empty State Label
+                {
+                    lbl.Width = pnlCommentsList.ClientSize.Width - 10;
+                }
+            }
+            pnlCommentsList.ResumeLayout(true);
+        }
+
+        private void UpdateCommentPanelWidth(Panel pnl)
+        {
+            int scrollBarWidth = 25; 
+            pnl.Width = pnlCommentsList.ClientSize.Width - pnlCommentsList.Padding.Horizontal - scrollBarWidth;
+            
+            // Tìm label nội dung để set MaximumSize hỗ trợ word-wrap
+            foreach (Control c in pnl.Controls)
+            {
+                if (c is Label lbl && lbl.Dock != DockStyle.Top) // Label nội dung (không dock top hoặc label thứ 2)
+                {
+                    // Ở AddCommentToUI ta add lblContent sau lblUser, nhưng cả hai đều Dock.Top
+                    // lblContent được add trước (index lớn hơn nếu dùng pnl.Controls.Add) hoặc ngược lại.
+                    // Label nội dung là label không có font bold (tương đối).
+                }
+                
+                // Cách an toàn hơn: duyệt tất cả label và set MaximumSize cho label content
+                if (c is Label l)
+                {
+                    l.MaximumSize = new Size(pnl.Width - pnl.Padding.Horizontal, 0);
+                }
+            }
+        }
+
+        private void AddCommentToUI(Comment c)
+        {
+            // Bubble chat container
+            var pnl = new Panel 
+            { 
+                AutoSize = true, 
+                Padding = new Padding(12), 
+                Margin = new Padding(5),
+                BackColor = System.Drawing.Color.White,
+                Tag = c // Lưu entity để phục vụ logic Resize
+            };
+
+            // Tính toán Width ban đầu
+            UpdateCommentPanelWidth(pnl);
+
+            // Tên người dùng (Bold) + Thời gian (Small)
+            var lblUser = new Label 
+            { 
+                Text = $"{c.User?.FullName ?? "Unknown"} • {c.CreatedAt.ToLocalTime():g}", 
+                Font = new System.Drawing.Font(UIHelper.FontBase.FontFamily, 8.5f, System.Drawing.FontStyle.Bold), 
+                ForeColor = UIHelper.ColorDark, 
+                Dock = DockStyle.Top, 
+                AutoSize = true 
+            };
+            
+            // Nội dung bình luận
+            var lblContent = new Label 
+            { 
+                Text = c.Content, 
+                Font = UIHelper.FontBase, 
+                ForeColor = UIHelper.ColorDark,
+                Dock = DockStyle.Top, 
+                AutoSize = true, 
+                Padding = new Padding(0, 6, 0, 0) 
+            };
+            
+            pnl.Controls.Add(lblContent);
+            pnl.Controls.Add(lblUser);
+
+            // Phải set MaximumSize SAU khi add vào panel để panel.Width đã ổn định
+            lblContent.MaximumSize = new Size(pnl.Width - pnl.Padding.Horizontal - 5, 0);
+
+            pnlCommentsList.Controls.Add(pnl);
+        }
+
+        private async void btnSendComment_Click(object? sender, EventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi bình luận.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            
+            var content = txtNewComment.Text.Trim();
+            if (string.IsNullOrEmpty(content)) return;
+
+            btnSendComment.Enabled = false;
+            var (ok, msg, newComment) = await _taskService.AddCommentAsync(_taskId.Value, content, AppSession.UserId, AppSession.Roles);
+            
+            if (ok && newComment != null)
+            {
+                txtNewComment.Clear();
+                
+                // Nếu đang hiển thị label trống thì xóa đi trước
+                if (pnlCommentsList.Controls.Count == 1 && pnlCommentsList.Controls[0] is Label lbl && lbl.Height == 100)
+                {
+                    pnlCommentsList.Controls.Clear();
+                }
+
+                AddCommentToUI(newComment);
+                ScrollToBottom();
+            }
+            else
+            {
+                MessageBox.Show(msg, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            btnSendComment.Enabled = true;
+        }
+
+        private async Task LoadAttachmentsAsync()
+        {
+            if (!_taskId.HasValue) return;
+            var attachments = await _taskService.GetAttachmentsAsync(_taskId.Value);
+            lvwAttachments.Items.Clear();
+            foreach (var a in attachments)
+            {
+                var item = new ListViewItem(a.FileName);
+                item.SubItems.Add($"{a.FileSizeBytes / 1024} KB");
+                item.SubItems.Add(a.UploadedAt.ToLocalTime().ToString("g"));
+                item.SubItems.Add(a.UploadedBy?.FullName ?? "Unknown");
+                item.Tag = a;
+                lvwAttachments.Items.Add(item);
+            }
+        }
+
+        private async void btnChooseFile_Click(object? sender, EventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi đính kèm.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using var ofd = new OpenFileDialog();
+            ofd.Multiselect = false;
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                await UploadFileAsync(ofd.FileName);
+            }
+        }
+
+        private void lvwAttachments_DragEnter(object? sender, DragEventArgs e)
+        {
+            if (e.Data!.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+            else
+                e.Effect = DragDropEffects.None;
+        }
+
+        private async void lvwAttachments_DragDrop(object? sender, DragEventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi đính kèm.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var files = (string[])e.Data!.GetData(DataFormats.FileDrop)!;
+            if (files.Length > 0)
+            {
+                await UploadFileAsync(files[0]);
+            }
+        }
+
+        private async Task UploadFileAsync(string filePath)
+        {
+            btnChooseFile.Enabled = false;
+            btnChooseFile.Text = "Đang tải...";
+
+            var (ok, msg, newAttachment) = await _taskService.UploadAttachmentAsync(_taskId!.Value, filePath, AppSession.UserId, AppSession.Roles);
+            
+            if (ok && newAttachment != null)
+            {
+                var item = new ListViewItem(newAttachment.FileName);
+                item.SubItems.Add($"{newAttachment.FileSizeBytes / 1024} KB");
+                item.SubItems.Add(newAttachment.UploadedAt.ToLocalTime().ToString("g"));
+                item.SubItems.Add(newAttachment.UploadedBy?.FullName ?? "Unknown");
+                item.Tag = newAttachment;
+                lvwAttachments.Items.Insert(0, item);
+            }
+            else
+            {
+                MessageBox.Show(msg, "Lỗi tải file", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            btnChooseFile.Enabled = true;
+            btnChooseFile.Text = "Chọn file...";
+        }
+
+        private void lvwAttachments_DoubleClick(object? sender, EventArgs e)
+        {
+            if (lvwAttachments.SelectedItems.Count == 0) return;
+            var item = lvwAttachments.SelectedItems[0];
+            if (item.Tag is Attachment a)
+            {
+                var fullPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, a.FilePath);
+                if (File.Exists(fullPath))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = fullPath,
+                        UseShellExecute = true
+                    });
+                }
+                else
+                {
+                    MessageBox.Show("File không còn tồn tại trên hệ thống.", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
+        private async void lvwAttachments_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Delete && lvwAttachments.SelectedItems.Count > 0)
+            {
+                var item = lvwAttachments.SelectedItems[0];
+                if (item.Tag is Attachment a)
+                {
+                    if (MessageBox.Show($"Bạn có chắc muốn xóa file {a.FileName}?", "Xác nhận", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        var (ok, msg) = await _taskService.DeleteAttachmentAsync(a.Id, AppSession.UserId, AppSession.Roles);
+                        if (ok)
+                        {
+                            lvwAttachments.Items.Remove(item);
+                        }
+                        else
+                        {
+                            MessageBox.Show(msg, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -14642,7 +15371,11 @@ namespace TaskFlowManagement.WinForms.Forms
             panelAccentLine = new Panel();
             lblHeader = new Label();
 
-            panelContent = new Panel();
+            tabControlMain = new TabControl();
+            tabGeneral = new TabPage();
+            tabComments = new TabPage();
+            tabAttachments = new TabPage();
+
             panelLeft = new Panel();
             panelRight = new Panel();
             panelButtons = new Panel();
@@ -14675,7 +15408,10 @@ namespace TaskFlowManagement.WinForms.Forms
             btnCancel = new Button();
 
             panelHeader.SuspendLayout();
-            panelContent.SuspendLayout();
+            tabControlMain.SuspendLayout();
+            tabGeneral.SuspendLayout();
+            tabComments.SuspendLayout();
+            tabAttachments.SuspendLayout();
             panelLeft.SuspendLayout();
             panelRight.SuspendLayout();
             panelButtons.SuspendLayout();
@@ -14736,13 +15472,103 @@ namespace TaskFlowManagement.WinForms.Forms
             panelButtons.Controls.AddRange(new Control[] { btnSave, btnCancel });
 
             // ════════════════════════════════════════════════════
-            // panelContent — Chứa panelLeft + panelRight (Dock.Fill)
+            // tabControlMain — Thay thế panelContent, Dock.Fill
             // ════════════════════════════════════════════════════
-            panelContent.BackColor = UIHelper.ColorBackground;
-            panelContent.Dock = DockStyle.Fill;
-            panelContent.Name = "panelContent";
-            panelContent.Controls.Add(panelLeft);
-            panelContent.Controls.Add(panelRight);
+            tabControlMain.Dock = DockStyle.Fill;
+            tabControlMain.Font = UIHelper.FontBase;
+            tabControlMain.Name = "tabControlMain";
+            tabControlMain.Controls.Add(tabGeneral);
+            tabControlMain.Controls.Add(tabComments);
+            tabControlMain.Controls.Add(tabAttachments);
+            tabControlMain.SelectedIndexChanged += tabControlMain_SelectedIndexChanged;
+
+            // ── tabGeneral ────────────────────────────────────────────────────
+            tabGeneral.Name = "tabGeneral";
+            tabGeneral.Text = "Chi tiết công việc";
+            tabGeneral.BackColor = UIHelper.ColorBackground;
+            tabGeneral.Controls.Add(panelLeft);
+            tabGeneral.Controls.Add(panelRight);
+
+            // ── tabComments ───────────────────────────────────────────────────
+            tabComments.Name = "tabComments";
+            tabComments.Text = "Thảo luận";
+            tabComments.BackColor = UIHelper.ColorBackground;
+            
+            pnlCommentsList = new FlowLayoutPanel();
+            pnlCommentsList.Dock = DockStyle.Fill;
+            pnlCommentsList.AutoScroll = true;
+            pnlCommentsList.Padding = new Padding(10);
+            pnlCommentsList.FlowDirection = FlowDirection.TopDown;
+            pnlCommentsList.WrapContents = false;
+            pnlCommentsList.BackColor = UIHelper.ColorBackground;
+            pnlCommentsList.Resize += pnlCommentsList_Resize;
+
+            var pnlCommentInput = new Panel();
+            pnlCommentInput.Dock = DockStyle.Bottom;
+            pnlCommentInput.Height = 60;
+            pnlCommentInput.Padding = new Padding(10);
+            
+            txtNewComment = new TextBox();
+            txtNewComment.Multiline = true;
+            txtNewComment.Dock = DockStyle.Fill;
+            txtNewComment.Font = UIHelper.FontBase;
+            
+            btnSendComment = new Button();
+            btnSendComment.Dock = DockStyle.Right;
+            btnSendComment.Width = 80;
+            btnSendComment.Text = "Gửi";
+            btnSendComment.Font = UIHelper.FontBase;
+            UIHelper.StyleButton(btnSendComment, UIHelper.ButtonVariant.Primary);
+            btnSendComment.Click += btnSendComment_Click;
+
+            pnlCommentInput.Controls.Add(txtNewComment);
+            pnlCommentInput.Controls.Add(btnSendComment);
+            
+            tabComments.Controls.Add(pnlCommentsList);
+            tabComments.Controls.Add(pnlCommentInput);
+
+            // ── tabAttachments ────────────────────────────────────────────────
+            tabAttachments.Name = "tabAttachments";
+            tabAttachments.Text = "Đính kèm";
+            tabAttachments.BackColor = UIHelper.ColorBackground;
+            
+            lvwAttachments = new ListView();
+            lvwAttachments.Dock = DockStyle.Fill;
+            lvwAttachments.View = View.Details;
+            lvwAttachments.FullRowSelect = true;
+            lvwAttachments.AllowDrop = true;
+            lvwAttachments.Columns.Add("Tên file", 300);
+            lvwAttachments.Columns.Add("Kích thước", 100);
+            lvwAttachments.Columns.Add("Ngày tải", 150);
+            lvwAttachments.Columns.Add("Người tải", 150);
+            lvwAttachments.Font = UIHelper.FontBase;
+            lvwAttachments.DoubleClick += lvwAttachments_DoubleClick;
+            lvwAttachments.DragEnter += lvwAttachments_DragEnter;
+            lvwAttachments.DragDrop += lvwAttachments_DragDrop;
+            lvwAttachments.KeyDown += lvwAttachments_KeyDown;
+            
+            var pnlAttachmentTop = new Panel();
+            pnlAttachmentTop.Dock = DockStyle.Top;
+            pnlAttachmentTop.Height = 44;
+            pnlAttachmentTop.Padding = new Padding(10, 5, 0, 5);
+
+            btnChooseFile = new Button();
+            btnChooseFile.Text = "Chọn file...";
+            btnChooseFile.Width = 100;
+            btnChooseFile.Dock = DockStyle.Left;
+            UIHelper.StyleButton(btnChooseFile, UIHelper.ButtonVariant.Secondary);
+            btnChooseFile.Click += btnChooseFile_Click;
+            
+            var lblAttachmentHint = new Label();
+            lblAttachmentHint.Text = "  Hoặc kéo thả file vào danh sách bên dưới. Lưu ý: có thể nhấn Delete để xoá file.";
+            lblAttachmentHint.Dock = DockStyle.Fill;
+            lblAttachmentHint.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+            
+            pnlAttachmentTop.Controls.Add(lblAttachmentHint);
+            pnlAttachmentTop.Controls.Add(btnChooseFile);
+
+            tabAttachments.Controls.Add(lvwAttachments);
+            tabAttachments.Controls.Add(pnlAttachmentTop);
 
             // ════════════════════════════════════════════════════
             // panelLeft — Cột trái (tiêu đề, dự án, assignee, mô tả, giờ)
@@ -14899,12 +15725,15 @@ namespace TaskFlowManagement.WinForms.Forms
             this.Font = UIHelper.FontBase;
 
             // Thứ tự Add: Fill → Bottom → Top
-            this.Controls.Add(panelContent);   // DockStyle.Fill
+            this.Controls.Add(tabControlMain); // DockStyle.Fill
             this.Controls.Add(panelButtons);   // DockStyle.Bottom
             this.Controls.Add(panelHeader);    // DockStyle.Top
 
             panelHeader.ResumeLayout(false);
-            panelContent.ResumeLayout(false);
+            tabControlMain.ResumeLayout(false);
+            tabGeneral.ResumeLayout(false);
+            tabComments.ResumeLayout(false);
+            tabAttachments.ResumeLayout(false);
             panelLeft.ResumeLayout(false);
             panelRight.ResumeLayout(false);
             panelButtons.ResumeLayout(false);
@@ -14926,7 +15755,14 @@ namespace TaskFlowManagement.WinForms.Forms
         // ── Field declarations ────────────────────────────────────────────────
         private Panel panelHeader, panelAccentLine;
         private Label lblHeader;
-        private Panel panelContent, panelLeft, panelRight, panelButtons;
+        private TabControl tabControlMain;
+        private TabPage tabGeneral, tabComments, tabAttachments;
+        private Panel panelLeft, panelRight, panelButtons;
+        private FlowLayoutPanel pnlCommentsList;
+        private TextBox txtNewComment;
+        private Button btnSendComment;
+        private ListView lvwAttachments;
+        private Button btnChooseFile;
         private Label lblTitle;
         private TextBox txtTitle;
         private Label lblDescription;
@@ -16609,7 +17445,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bd9b5ff87553b95c029a03c64bb00f5d05bf6674")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
@@ -16666,7 +17502,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+804b3cf02e67f955e36abaa8efcd8aeba329644e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+21475b85ea8b4e7a8954939c989347ca129bdafe")]
 [assembly: System.Reflection.AssemblyProductAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyTitleAttribute("TaskFlowManagement.WinForms")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

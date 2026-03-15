@@ -29,13 +29,24 @@ namespace TaskFlowManagement.Core.Services.Tasks
     {
         private readonly ITaskRepository _taskRepo;
         private readonly IUserRepository _userRepo;
+        private readonly IProjectRepository _projectRepo;
+        private readonly ICommentRepository _commentRepo;
+        private readonly IAttachmentRepository _attachmentRepo;
 
         public event EventHandler? TaskDataChanged;
 
-        public TaskService(ITaskRepository taskRepo, IUserRepository userRepo)
+        public TaskService(
+            ITaskRepository taskRepo, 
+            IUserRepository userRepo,
+            IProjectRepository projectRepo,
+            ICommentRepository commentRepo,
+            IAttachmentRepository attachmentRepo)
         {
             _taskRepo = taskRepo ?? throw new ArgumentNullException(nameof(taskRepo));
             _userRepo = userRepo ?? throw new ArgumentNullException(nameof(userRepo));
+            _projectRepo = projectRepo ?? throw new ArgumentNullException(nameof(projectRepo));
+            _commentRepo = commentRepo ?? throw new ArgumentNullException(nameof(commentRepo));
+            _attachmentRepo = attachmentRepo ?? throw new ArgumentNullException(nameof(attachmentRepo));
         }
 
         private void NotifyTaskDataChanged()
@@ -183,6 +194,18 @@ namespace TaskFlowManagement.Core.Services.Tasks
                     "Hãy xóa các công việc con trước.");
 
             await _taskRepo.DeleteAsync(taskId);
+            
+            // Xóa folder vật lý chứa đính kèm
+            try 
+            {
+                var uploadsFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uploads", "Tasks", taskId.ToString());
+                if (Directory.Exists(uploadsFolder))
+                {
+                    Directory.Delete(uploadsFolder, true);
+                }
+            } 
+            catch { /* Ignore if it fails during cleanup */ }
+
             NotifyTaskDataChanged();
             return (true, $"Đã xóa công việc \"{task.Title}\".");
         }
@@ -330,5 +353,158 @@ namespace TaskFlowManagement.Core.Services.Tasks
         public Task<List<Status>>   GetAllStatusesAsync()   => _taskRepo.GetAllStatusesAsync();
         public Task<List<Priority>> GetAllPrioritiesAsync() => _taskRepo.GetAllPrioritiesAsync();
         public Task<List<Category>> GetAllCategoriesAsync() => _taskRepo.GetAllCategoriesAsync();
+
+        // ══════════════════════════════════════════════════════
+        // GIAI ĐOẠN 7: COMMENT & ATTACHMENT
+        // ══════════════════════════════════════════════════════
+
+        private async Task<bool> IsAuthorizedForTaskAsync(int taskId, int requesterId, IList<string> requesterRoles)
+        {
+            if (requesterRoles.Any(r => r.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                                        r.Equals("Manager", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+
+            var task = await _taskRepo.GetByIdAsync(taskId);
+            if (task == null) return false;
+
+            var members = await _projectRepo.GetMembersAsync(task.ProjectId);
+            return members.Any(m => m.UserId == requesterId);
+        }
+
+        public async Task<List<Comment>> GetCommentsAsync(int taskId)
+        {
+             return await _commentRepo.GetByTaskIdAsync(taskId);
+        }
+
+        public async Task<(bool Success, string Message, Comment? Data)> AddCommentAsync(
+            int taskId,
+            string content,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+             if (string.IsNullOrWhiteSpace(content))
+                 return (false, "Nội dung bình luận không được để trống.", null);
+
+             var isAuth = await IsAuthorizedForTaskAsync(taskId, requesterId, requesterRoles);
+             if (!isAuth)
+                 return (false, "Bạn không có quyền bình luận trong công việc này.", null);
+
+             var comment = new Comment
+             {
+                 TaskItemId = taskId,
+                 UserId = requesterId,
+                 Content = content,
+                 CreatedAt = DateTime.UtcNow
+             };
+
+             await _commentRepo.AddAsync(comment);
+             
+             // Get full data to return to UI (including user info)
+             var addedComment = await _commentRepo.GetByIdAsync(comment.Id);
+             
+             NotifyTaskDataChanged();
+             return (true, "Thêm bình luận thành công.", addedComment);
+        }
+
+        public async Task<List<Attachment>> GetAttachmentsAsync(int taskId)
+        {
+             return await _attachmentRepo.GetByTaskIdAsync(taskId);
+        }
+
+        public async Task<(bool Success, string Message, Attachment? Data)> UploadAttachmentAsync(
+            int taskId,
+            string sourcePath,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+            var isAuth = await IsAuthorizedForTaskAsync(taskId, requesterId, requesterRoles);
+            if (!isAuth)
+                return (false, "Bạn không có quyền đính kèm file trong công việc này.", null);
+
+            var fileInfo = new FileInfo(sourcePath);
+            if (!fileInfo.Exists)
+                return (false, "File không tồn tại.", null);
+
+            var fileName = fileInfo.Name;
+            var extension = fileInfo.Extension;
+            var sizeBytes = fileInfo.Length;
+
+            // Define upload path
+            var uploadsFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Uploads", "Tasks", taskId.ToString());
+            if (!Directory.Exists(uploadsFolder))
+            {
+                Directory.CreateDirectory(uploadsFolder);
+            }
+
+            // Generate unique filename to avoid collision
+            var uniqueFileName = $"{Guid.NewGuid()}_{fileName}";
+            var destinationPath = Path.Combine(uploadsFolder, uniqueFileName);
+
+            try
+            {
+                await Task.Run(() => File.Copy(sourcePath, destinationPath, true));
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Lỗi khi tải lên tệp: {ex.Message}", null);
+            }
+
+            var relativePath = Path.Combine("Uploads", "Tasks", taskId.ToString(), uniqueFileName);
+
+            var attachment = new Attachment
+            {
+                TaskItemId = taskId,
+                UploadedById = requesterId,
+                FileName = fileName,
+                FilePath = relativePath,
+                ContentType = extension,
+                FileSizeBytes = sizeBytes,
+                UploadedAt = DateTime.UtcNow
+            };
+
+            await _attachmentRepo.AddAsync(attachment);
+
+            var addedAttachment = await _attachmentRepo.GetByIdAsync(attachment.Id);
+
+            NotifyTaskDataChanged();
+            return (true, "Tải tệp thành công.", addedAttachment);
+        }
+
+        public async Task<(bool Success, string Message)> DeleteAttachmentAsync(
+            int attachmentId,
+            int requesterId,
+            IList<string> requesterRoles)
+        {
+             var attachment = await _attachmentRepo.GetByIdAsync(attachmentId);
+             if (attachment == null) return (false, "Không tìm thấy file.");
+
+             var isManagerOrAbove = requesterRoles.Any(r => r.Equals("Admin", StringComparison.OrdinalIgnoreCase) ||
+                                                             r.Equals("Manager", StringComparison.OrdinalIgnoreCase));
+             
+             // Only owner or manager/admin can delete
+             if (attachment.UploadedById != requesterId && !isManagerOrAbove)
+                 return (false, "Bạn không có quyền xóa tệp này.");
+
+             // Delete physical file
+             var fullPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, attachment.FilePath);
+             if (File.Exists(fullPath))
+             {
+                 try
+                 {
+                     File.Delete(fullPath);
+                 }
+                 catch
+                 {
+                     // ignore if can't delete physically
+                 }
+             }
+
+             await _attachmentRepo.DeleteAsync(attachmentId);
+             NotifyTaskDataChanged();
+
+             return (true, "Đã xóa file đính kèm.");
+        }
     }
 }

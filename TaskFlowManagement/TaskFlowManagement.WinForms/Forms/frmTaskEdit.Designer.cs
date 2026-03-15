@@ -19,7 +19,11 @@ namespace TaskFlowManagement.WinForms.Forms
             panelAccentLine = new Panel();
             lblHeader = new Label();
 
-            panelContent = new Panel();
+            tabControlMain = new TabControl();
+            tabGeneral = new TabPage();
+            tabComments = new TabPage();
+            tabAttachments = new TabPage();
+
             panelLeft = new Panel();
             panelRight = new Panel();
             panelButtons = new Panel();
@@ -52,7 +56,10 @@ namespace TaskFlowManagement.WinForms.Forms
             btnCancel = new Button();
 
             panelHeader.SuspendLayout();
-            panelContent.SuspendLayout();
+            tabControlMain.SuspendLayout();
+            tabGeneral.SuspendLayout();
+            tabComments.SuspendLayout();
+            tabAttachments.SuspendLayout();
             panelLeft.SuspendLayout();
             panelRight.SuspendLayout();
             panelButtons.SuspendLayout();
@@ -113,13 +120,103 @@ namespace TaskFlowManagement.WinForms.Forms
             panelButtons.Controls.AddRange(new Control[] { btnSave, btnCancel });
 
             // ════════════════════════════════════════════════════
-            // panelContent — Chứa panelLeft + panelRight (Dock.Fill)
+            // tabControlMain — Thay thế panelContent, Dock.Fill
             // ════════════════════════════════════════════════════
-            panelContent.BackColor = UIHelper.ColorBackground;
-            panelContent.Dock = DockStyle.Fill;
-            panelContent.Name = "panelContent";
-            panelContent.Controls.Add(panelLeft);
-            panelContent.Controls.Add(panelRight);
+            tabControlMain.Dock = DockStyle.Fill;
+            tabControlMain.Font = UIHelper.FontBase;
+            tabControlMain.Name = "tabControlMain";
+            tabControlMain.Controls.Add(tabGeneral);
+            tabControlMain.Controls.Add(tabComments);
+            tabControlMain.Controls.Add(tabAttachments);
+            tabControlMain.SelectedIndexChanged += tabControlMain_SelectedIndexChanged;
+
+            // ── tabGeneral ────────────────────────────────────────────────────
+            tabGeneral.Name = "tabGeneral";
+            tabGeneral.Text = "Chi tiết công việc";
+            tabGeneral.BackColor = UIHelper.ColorBackground;
+            tabGeneral.Controls.Add(panelLeft);
+            tabGeneral.Controls.Add(panelRight);
+
+            // ── tabComments ───────────────────────────────────────────────────
+            tabComments.Name = "tabComments";
+            tabComments.Text = "Thảo luận";
+            tabComments.BackColor = UIHelper.ColorBackground;
+            
+            pnlCommentsList = new FlowLayoutPanel();
+            pnlCommentsList.Dock = DockStyle.Fill;
+            pnlCommentsList.AutoScroll = true;
+            pnlCommentsList.Padding = new Padding(10);
+            pnlCommentsList.FlowDirection = FlowDirection.TopDown;
+            pnlCommentsList.WrapContents = false;
+            pnlCommentsList.BackColor = UIHelper.ColorBackground;
+            pnlCommentsList.Resize += pnlCommentsList_Resize;
+
+            var pnlCommentInput = new Panel();
+            pnlCommentInput.Dock = DockStyle.Bottom;
+            pnlCommentInput.Height = 60;
+            pnlCommentInput.Padding = new Padding(10);
+            
+            txtNewComment = new TextBox();
+            txtNewComment.Multiline = true;
+            txtNewComment.Dock = DockStyle.Fill;
+            txtNewComment.Font = UIHelper.FontBase;
+            
+            btnSendComment = new Button();
+            btnSendComment.Dock = DockStyle.Right;
+            btnSendComment.Width = 80;
+            btnSendComment.Text = "Gửi";
+            btnSendComment.Font = UIHelper.FontBase;
+            UIHelper.StyleButton(btnSendComment, UIHelper.ButtonVariant.Primary);
+            btnSendComment.Click += btnSendComment_Click;
+
+            pnlCommentInput.Controls.Add(txtNewComment);
+            pnlCommentInput.Controls.Add(btnSendComment);
+            
+            tabComments.Controls.Add(pnlCommentsList);
+            tabComments.Controls.Add(pnlCommentInput);
+
+            // ── tabAttachments ────────────────────────────────────────────────
+            tabAttachments.Name = "tabAttachments";
+            tabAttachments.Text = "Đính kèm";
+            tabAttachments.BackColor = UIHelper.ColorBackground;
+            
+            lvwAttachments = new ListView();
+            lvwAttachments.Dock = DockStyle.Fill;
+            lvwAttachments.View = View.Details;
+            lvwAttachments.FullRowSelect = true;
+            lvwAttachments.AllowDrop = true;
+            lvwAttachments.Columns.Add("Tên file", 300);
+            lvwAttachments.Columns.Add("Kích thước", 100);
+            lvwAttachments.Columns.Add("Ngày tải", 150);
+            lvwAttachments.Columns.Add("Người tải", 150);
+            lvwAttachments.Font = UIHelper.FontBase;
+            lvwAttachments.DoubleClick += lvwAttachments_DoubleClick;
+            lvwAttachments.DragEnter += lvwAttachments_DragEnter;
+            lvwAttachments.DragDrop += lvwAttachments_DragDrop;
+            lvwAttachments.KeyDown += lvwAttachments_KeyDown;
+            
+            var pnlAttachmentTop = new Panel();
+            pnlAttachmentTop.Dock = DockStyle.Top;
+            pnlAttachmentTop.Height = 44;
+            pnlAttachmentTop.Padding = new Padding(10, 5, 0, 5);
+
+            btnChooseFile = new Button();
+            btnChooseFile.Text = "Chọn file...";
+            btnChooseFile.Width = 100;
+            btnChooseFile.Dock = DockStyle.Left;
+            UIHelper.StyleButton(btnChooseFile, UIHelper.ButtonVariant.Secondary);
+            btnChooseFile.Click += btnChooseFile_Click;
+            
+            var lblAttachmentHint = new Label();
+            lblAttachmentHint.Text = "  Hoặc kéo thả file vào danh sách bên dưới. Lưu ý: có thể nhấn Delete để xoá file.";
+            lblAttachmentHint.Dock = DockStyle.Fill;
+            lblAttachmentHint.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
+            
+            pnlAttachmentTop.Controls.Add(lblAttachmentHint);
+            pnlAttachmentTop.Controls.Add(btnChooseFile);
+
+            tabAttachments.Controls.Add(lvwAttachments);
+            tabAttachments.Controls.Add(pnlAttachmentTop);
 
             // ════════════════════════════════════════════════════
             // panelLeft — Cột trái (tiêu đề, dự án, assignee, mô tả, giờ)
@@ -276,12 +373,15 @@ namespace TaskFlowManagement.WinForms.Forms
             this.Font = UIHelper.FontBase;
 
             // Thứ tự Add: Fill → Bottom → Top
-            this.Controls.Add(panelContent);   // DockStyle.Fill
+            this.Controls.Add(tabControlMain); // DockStyle.Fill
             this.Controls.Add(panelButtons);   // DockStyle.Bottom
             this.Controls.Add(panelHeader);    // DockStyle.Top
 
             panelHeader.ResumeLayout(false);
-            panelContent.ResumeLayout(false);
+            tabControlMain.ResumeLayout(false);
+            tabGeneral.ResumeLayout(false);
+            tabComments.ResumeLayout(false);
+            tabAttachments.ResumeLayout(false);
             panelLeft.ResumeLayout(false);
             panelRight.ResumeLayout(false);
             panelButtons.ResumeLayout(false);
@@ -303,7 +403,14 @@ namespace TaskFlowManagement.WinForms.Forms
         // ── Field declarations ────────────────────────────────────────────────
         private Panel panelHeader, panelAccentLine;
         private Label lblHeader;
-        private Panel panelContent, panelLeft, panelRight, panelButtons;
+        private TabControl tabControlMain;
+        private TabPage tabGeneral, tabComments, tabAttachments;
+        private Panel panelLeft, panelRight, panelButtons;
+        private FlowLayoutPanel pnlCommentsList;
+        private TextBox txtNewComment;
+        private Button btnSendComment;
+        private ListView lvwAttachments;
+        private Button btnChooseFile;
         private Label lblTitle;
         private TextBox txtTitle;
         private Label lblDescription;

@@ -54,6 +54,8 @@ namespace TaskFlowManagement.WinForms
             services.AddScoped<IProjectRepository, ProjectRepository>();
             services.AddScoped<ITaskRepository, TaskRepository>();
             services.AddScoped<ICustomerRepository, CustomerRepository>();
+            services.AddScoped<ICommentRepository, CommentRepository>();
+            services.AddScoped<IAttachmentRepository, AttachmentRepository>();
 
             // 4. Services
             services.AddScoped<IAuthService, AuthService>();

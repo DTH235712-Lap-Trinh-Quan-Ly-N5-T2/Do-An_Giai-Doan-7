@@ -1,3 +1,4 @@
+using System.IO;
 using TaskFlowManagement.Core.Entities;
 using TaskFlowManagement.Core.Interfaces.Services;
 using TaskFlowManagement.WinForms.Common;
@@ -190,6 +191,9 @@ namespace TaskFlowManagement.WinForms.Forms
             cboStatus.Enabled = isManager || isAssignee;
             cboPriority.Enabled = isManager;
             cboAssignee.Enabled = isManager || isAssignee;
+
+            await LoadCommentsAsync();
+            await LoadAttachmentsAsync();
         }
 
         private void SetDefaultsForNewTask()
@@ -325,6 +329,327 @@ namespace TaskFlowManagement.WinForms.Forms
             {
                 if (cbo.Items[i] is ComboItem ci && ci.Id == id)
                 { cbo.SelectedIndex = i; return; }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // GIAI ĐOẠN 7: COMMENT & ATTACHMENT LOGIC
+        // ═══════════════════════════════════════════════════════════════════
+
+        private void tabControlMain_SelectedIndexChanged(object? sender, EventArgs e)
+        {
+            if (tabControlMain.SelectedTab == tabComments)
+            {
+                _ = LoadCommentsAsync();
+            }
+            else if (tabControlMain.SelectedTab == tabAttachments)
+            {
+                _ = LoadAttachmentsAsync();
+            }
+        }
+
+        private async Task LoadCommentsAsync()
+        {
+            if (!_taskId.HasValue) return;
+            
+            try 
+            {
+                var comments = await _taskService.GetCommentsAsync(_taskId.Value);
+                
+                this.InvokeIfRequired(() => {
+                    pnlCommentsList.Controls.Clear();
+                    
+                    if (comments == null || comments.Count == 0)
+                    {
+                        var lblEmpty = new Label
+                        {
+                            Text = "Chưa có bình luận nào cho công việc này. Hãy là người đầu tiên thảo luận!",
+                            Font = UIHelper.FontBase,
+                            ForeColor = UIHelper.ColorMuted,
+                            TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
+                            Dock = DockStyle.Top,
+                            Height = 100,
+                            AutoSize = false
+                        };
+                        pnlCommentsList.Controls.Add(lblEmpty);
+                    }
+                    else 
+                    {
+                        foreach (var c in comments)
+                        {
+                            AddCommentToUI(c);
+                        }
+                    }
+                    
+                    // Cuộn xuống dưới cùng
+                    ScrollToBottom();
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi nạp bình luận: " + ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ScrollToBottom()
+        {
+            if (pnlCommentsList.VerticalScroll.Visible)
+            {
+                pnlCommentsList.VerticalScroll.Value = pnlCommentsList.VerticalScroll.Maximum;
+            }
+            pnlCommentsList.PerformLayout();
+        }
+
+        private void pnlCommentsList_Resize(object? sender, EventArgs e)
+        {
+            pnlCommentsList.SuspendLayout();
+            int available = pnlCommentsList.ClientSize.Width - 10;
+            foreach (Control ctrl in pnlCommentsList.Controls)
+            {
+                if (ctrl is Panel pnl && pnl.Tag is Comment)
+                {
+                    RebuildCommentPanel(pnl, available);
+                }
+                else if (ctrl is Label emptyLbl)
+                {
+                    emptyLbl.Width = available;
+                }
+            }
+            pnlCommentsList.ResumeLayout(true);
+            pnlCommentsList.PerformLayout();
+        }
+
+        /// <summary>
+        /// Tính lại layout (location + height) cho một Panel bình luận
+        /// dựa trên availableWidth. Gọi khi Add lần đầu và khi Resize.
+        /// </summary>
+        private void RebuildCommentPanel(Panel pnl, int availableWidth)
+        {
+            const int innerPad = 10;
+            const int lineGap  = 6;
+
+            pnl.Width = availableWidth;
+
+            int textWidth = availableWidth - innerPad * 2;
+            if (textWidth < 10) textWidth = 10;
+
+            if (pnl.Controls.Count < 2) return;
+            var lblUser    = pnl.Controls[0] as Label;
+            var lblContent = pnl.Controls[1] as Label;
+            if (lblUser == null || lblContent == null) return;
+
+            // Tính chiều cao thực tế từng label qua MeasureString
+            using var g = pnl.CreateGraphics();
+            int userH    = (int)Math.Ceiling(g.MeasureString(lblUser.Text,    lblUser.Font,    textWidth).Height);
+            int contentH = (int)Math.Ceiling(g.MeasureString(lblContent.Text, lblContent.Font, textWidth).Height);
+
+            lblUser.Location = new Point(innerPad, innerPad);
+            lblUser.Size     = new Size(textWidth, userH);
+
+            lblContent.Location = new Point(innerPad, innerPad + userH + lineGap);
+            lblContent.Size     = new Size(textWidth, contentH);
+
+            pnl.Height = innerPad + userH + lineGap + contentH + innerPad;
+        }
+
+        private void AddCommentToUI(Comment c)
+        {
+            int available = pnlCommentsList.ClientSize.Width - 10;
+
+            // Panel khung trắng — Height sẽ được tính chính xác bởi RebuildCommentPanel
+            var pnl = new Panel
+            {
+                Width     = available,
+                Height    = 60,             // tạm thời
+                Margin    = new Padding(0, 0, 0, 6),
+                BackColor = System.Drawing.Color.White,
+                Tag       = c               // nhận dạng trong Resize handler
+            };
+            // Không Dock, không Anchor — FlowLayoutPanel quản lý vị trí dọc
+
+            var lblUser = new Label
+            {
+                Text      = $"{c.User?.FullName ?? "Unknown"} \u2022 {c.CreatedAt.ToLocalTime():g}",
+                Font      = new System.Drawing.Font(UIHelper.FontBase.FontFamily, 8.5f, System.Drawing.FontStyle.Bold),
+                ForeColor = UIHelper.ColorMuted,
+                AutoSize  = false   // chiều cao do RebuildCommentPanel tính
+            };
+
+            var lblContent = new Label
+            {
+                Text      = c.Content,
+                Font      = UIHelper.FontBase,
+                ForeColor = UIHelper.ColorDark,
+                AutoSize  = false
+            };
+
+            // Thứ tự Add quan trọng: [0] = lblUser (trên), [1] = lblContent (dưới)
+            pnl.Controls.Add(lblUser);
+            pnl.Controls.Add(lblContent);
+
+            // Tính vị trí và chiều cao chính xác bằng MeasureString
+            RebuildCommentPanel(pnl, available);
+
+            pnlCommentsList.Controls.Add(pnl);
+        }
+
+
+        private async void btnSendComment_Click(object? sender, EventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi bình luận.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            
+            var content = txtNewComment.Text.Trim();
+            if (string.IsNullOrEmpty(content)) return;
+
+            btnSendComment.Enabled = false;
+            var (ok, msg, newComment) = await _taskService.AddCommentAsync(_taskId.Value, content, AppSession.UserId, AppSession.Roles);
+            
+            if (ok && newComment != null)
+            {
+                txtNewComment.Clear();
+                
+                // Nếu đang hiển thị label trống thì xóa đi trước
+                if (pnlCommentsList.Controls.Count == 1 && pnlCommentsList.Controls[0] is Label lbl && lbl.Height == 100)
+                {
+                    pnlCommentsList.Controls.Clear();
+                }
+
+                AddCommentToUI(newComment);
+                ScrollToBottom();
+            }
+            else
+            {
+                MessageBox.Show(msg, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            btnSendComment.Enabled = true;
+        }
+
+        private async Task LoadAttachmentsAsync()
+        {
+            if (!_taskId.HasValue) return;
+            var attachments = await _taskService.GetAttachmentsAsync(_taskId.Value);
+            lvwAttachments.Items.Clear();
+            foreach (var a in attachments)
+            {
+                var item = new ListViewItem(a.FileName);
+                item.SubItems.Add($"{a.FileSizeBytes / 1024} KB");
+                item.SubItems.Add(a.UploadedAt.ToLocalTime().ToString("g"));
+                item.SubItems.Add(a.UploadedBy?.FullName ?? "Unknown");
+                item.Tag = a;
+                lvwAttachments.Items.Add(item);
+            }
+        }
+
+        private async void btnChooseFile_Click(object? sender, EventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi đính kèm.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            using var ofd = new OpenFileDialog();
+            ofd.Multiselect = false;
+            if (ofd.ShowDialog() == DialogResult.OK)
+            {
+                await UploadFileAsync(ofd.FileName);
+            }
+        }
+
+        private void lvwAttachments_DragEnter(object? sender, DragEventArgs e)
+        {
+            if (e.Data!.GetDataPresent(DataFormats.FileDrop))
+                e.Effect = DragDropEffects.Copy;
+            else
+                e.Effect = DragDropEffects.None;
+        }
+
+        private async void lvwAttachments_DragDrop(object? sender, DragEventArgs e)
+        {
+            if (!_taskId.HasValue)
+            {
+                MessageBox.Show("Vui lòng lưu công việc trước khi đính kèm.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var files = (string[])e.Data!.GetData(DataFormats.FileDrop)!;
+            if (files.Length > 0)
+            {
+                await UploadFileAsync(files[0]);
+            }
+        }
+
+        private async Task UploadFileAsync(string filePath)
+        {
+            btnChooseFile.Enabled = false;
+            btnChooseFile.Text = "Đang tải...";
+
+            var (ok, msg, newAttachment) = await _taskService.UploadAttachmentAsync(_taskId!.Value, filePath, AppSession.UserId, AppSession.Roles);
+            
+            if (ok && newAttachment != null)
+            {
+                var item = new ListViewItem(newAttachment.FileName);
+                item.SubItems.Add($"{newAttachment.FileSizeBytes / 1024} KB");
+                item.SubItems.Add(newAttachment.UploadedAt.ToLocalTime().ToString("g"));
+                item.SubItems.Add(newAttachment.UploadedBy?.FullName ?? "Unknown");
+                item.Tag = newAttachment;
+                lvwAttachments.Items.Insert(0, item);
+            }
+            else
+            {
+                MessageBox.Show(msg, "Lỗi tải file", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+
+            btnChooseFile.Enabled = true;
+            btnChooseFile.Text = "Chọn file...";
+        }
+
+        private void lvwAttachments_DoubleClick(object? sender, EventArgs e)
+        {
+            if (lvwAttachments.SelectedItems.Count == 0) return;
+            var item = lvwAttachments.SelectedItems[0];
+            if (item.Tag is Attachment a)
+            {
+                var fullPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, a.FilePath);
+                if (File.Exists(fullPath))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = fullPath,
+                        UseShellExecute = true
+                    });
+                }
+                else
+                {
+                    MessageBox.Show("File không còn tồn tại trên hệ thống.", "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
+        private async void lvwAttachments_KeyDown(object? sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Delete && lvwAttachments.SelectedItems.Count > 0)
+            {
+                var item = lvwAttachments.SelectedItems[0];
+                if (item.Tag is Attachment a)
+                {
+                    if (MessageBox.Show($"Bạn có chắc muốn xóa file {a.FileName}?", "Xác nhận", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        var (ok, msg) = await _taskService.DeleteAttachmentAsync(a.Id, AppSession.UserId, AppSession.Roles);
+                        if (ok)
+                        {
+                            lvwAttachments.Items.Remove(item);
+                        }
+                        else
+                        {
+                            MessageBox.Show(msg, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                }
             }
         }
     }
